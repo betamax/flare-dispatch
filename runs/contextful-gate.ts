@@ -12,6 +12,7 @@ import {
   waitForChildrenDurably,
   workspace,
 } from "@fractalboxdev/flare-dispatch-core/primitives";
+import { check } from "./check";
 
 const REPO = "fractalboxdev/contextful";
 const DISCOVER = "cargo run --locked -q -p contextful-ci -- stages --parts";
@@ -201,8 +202,9 @@ export const contextfulGate = defineRun({
         const results = yield* waitForChildrenDurably({
             name: `await-stages-${offset}`,
             ids: handles.map((handle) => handle.executionId),
-            // A batch waits out its parts' queue age and exec deadline, plus checkout and upload.
-            timeout: `${(STAGE_QUEUE_SEC + STAGE_TIMEOUT_SEC) / 60 + 10} minutes`,
+            // A batch waits out its parts' queue age and the check run's whole ceiling,
+            // so a part still inside its own budget is never reported failed.
+            timeout: `${(STAGE_QUEUE_SEC + check.limits.maxDurationSec) / 60} minutes`,
           });
         results.forEach((result, index) => {
           if (result.status !== "success") failed.push(batch[index]!);
