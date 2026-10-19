@@ -69,3 +69,21 @@ RUN if [ "$WITH_RUST" = "true" ]; then \
     else \
       echo "WITH_RUST=false — no Rust toolchain baked. Lean image."; \
     fi
+
+# ── cargo-nextest (with the Rust toolchain) ─────────────────────────────────
+#
+# A consumer that shards its suite with `cargo nextest run --partition` needs
+# the runner on PATH; `cargo install` would compile it on every run. The
+# release archive is pinned by version and SHA-256 and lands beside cargo.
+ARG NEXTEST_VERSION=0.9.146
+ARG NEXTEST_SHA256=682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+RUN if [ "$WITH_RUST" = "true" ]; then \
+      set -eux; \
+      curl -fsSLo /tmp/cargo-nextest.tar.gz \
+        "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"; \
+      echo "${NEXTEST_SHA256}  /tmp/cargo-nextest.tar.gz" | sha256sum -c -; \
+      tar xzf /tmp/cargo-nextest.tar.gz -C "$CARGO_HOME/bin"; \
+      rm /tmp/cargo-nextest.tar.gz; \
+      chmod a+rx "$CARGO_HOME/bin/cargo-nextest"; \
+      cargo nextest --version; \
+    fi

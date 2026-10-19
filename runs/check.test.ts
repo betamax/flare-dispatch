@@ -697,6 +697,48 @@ describe("check source determinism", () => {
   });
 });
 
+describe("check restore", () => {
+  const entry = { key: `contextful-ci-${"c".repeat(64)}`, base: "/tmp/flare-dispatch-prebuilt/contextful-ci", paths: ["bin"] };
+  const mkdirs = (commands: readonly string[]) => commands.filter((command) => command === `mkdir -p ${entry.base}`);
+
+  it.effect("restores each entry after the clone, before the command", () => {
+    const { layer, handles } = makeCFRuntimeTest({ sandboxProgram: { [CHECK_CMD]: { exitCode: 0 } } });
+    return Effect.gen(function* () {
+      expect((yield* check.run({ ...baseInput, restore: [entry] })).exitCode).toBe(0);
+      const commands = handles.sandbox.execs.map((exec) => exec.command);
+      expect(mkdirs(commands)).toHaveLength(1);
+      expect(commands.indexOf(`mkdir -p ${entry.base}`)).toBeLessThan(commands.indexOf(CHECK_CMD));
+      expect(handles.executions.steps.map((step) => step.name)).toEqual(["resolve-config", "checkout", "exec", "upload-log"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("restores again into a re-cloned container", () => {
+    const { layer, handles } = makeCFRuntimeTest({
+      sandboxProgram: { "test -d /workspace/name/.git": { exitCode: 1 }, [CHECK_CMD]: { exitCode: 0 } },
+    });
+    return Effect.gen(function* () {
+      yield* check.run({ ...baseInput, restore: [entry] });
+      expect(handles.sandbox.clones).toHaveLength(2);
+      expect(mkdirs(handles.sandbox.execs.map((exec) => exec.command))).toHaveLength(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("runs the command when the entry is not in the cache", () => {
+    const { layer, handles } = makeCFRuntimeTest({ sandboxProgram: { [CHECK_CMD]: { exitCode: 0 } } });
+    return Effect.gen(function* () {
+      expect((yield* check.run({ ...baseInput, restore: [entry], failOnNonZeroExit: true })).exitCode).toBe(0);
+      expect(handles.sandbox.execs.map((exec) => exec.command)).toContain(CHECK_CMD);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it("refuses an entry outside /tmp or with a path-shaped key at the input schema", () => {
+    const decode = Schema.decodeUnknownEither(check.inputs);
+    expect(Either.isRight(decode({ ...baseInput, restore: [entry] }))).toBe(true);
+    expect(Either.isLeft(decode({ ...baseInput, restore: [{ ...entry, base: "/usr/local/cargo" }] }))).toBe(true);
+    expect(Either.isLeft(decode({ ...baseInput, restore: [{ ...entry, key: "../owner/other" }] }))).toBe(true);
+  });
+});
+
 describe("run ceiling (issue #42)", () => {
   it("covers a full 2700 s exec — the gate's per-stage ceiling — plus checkout and upload", () => {
     // A ceiling at the exec ceiling cuts every stage that uses its full exec
