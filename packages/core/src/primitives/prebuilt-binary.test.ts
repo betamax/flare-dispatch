@@ -9,7 +9,9 @@ import { makeCFRuntimeTest } from "../testing";
 import {
   KEY_FILES,
   isRestorableEntry,
+  includeTargetsCommand,
   keyMaterialCommand,
+  parseIncludeTargets,
   parsePathPackages,
   prebuildCargoBinary,
   prebuiltCommand,
@@ -27,6 +29,8 @@ const TREE = [
   "contextful-core v0.16.0 (/workspace/contextful/crates/contextful-core) (*)",
 ].join("\n");
 const KEY_SUM = "sha256sum /tmp/flare-dispatch-prebuilt-key.txt";
+const MANIFEST = "crates/acceptance/src/conformance/manifest.json";
+const INCLUDES = `HEAD:tools/ci/src/release.rs:    let registry = from_str(include_str!("../../../${MANIFEST}"))?;\n`;
 
 /** A cache that answers every restore with `hit` and records what reached it. */
 const recordingCache = (hit: boolean) => {
@@ -71,6 +75,40 @@ describe("prebuilt binary key", () => {
     expect(parsePathPackages("x v0.1.0 (/workspace/contextful/a/../b)", DIR)).toBeUndefined();
   });
 
+  it("keys every literal include_str!/include_bytes! target, resolved from its source file", () => {
+    expect(parseIncludeTargets(INCLUDES)).toEqual([MANIFEST]);
+    expect(
+      parseIncludeTargets(
+        [
+          'HEAD:tools/ci/src/a.rs:#[doc = include_str!("../README.md")]',
+          'HEAD:tools/ci/src/b.rs:const X: &[u8] = include_bytes!( "./data/x.bin" ); include_str!("../README.md")',
+          "HEAD:tools/ci/src/c.rs:no include here",
+        ].join("\n"),
+      ),
+    ).toEqual(["tools/ci/README.md", "tools/ci/src/data/x.bin"]);
+    expect(parseIncludeTargets("")).toEqual([]);
+  });
+
+  it("refuses a binary whose include target it cannot key by the checkout's content", () => {
+    expect(
+      parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!("../../../../outside")'),
+    ).toBeUndefined();
+    expect(
+      parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!("/etc/hosts")'),
+    ).toBeUndefined();
+    expect(
+      parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!(concat!(env!("OUT_DIR"), "/x"))'),
+    ).toBeUndefined();
+    expect(parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!("a b")')).toBeUndefined();
+  });
+
+  it("searches only the path packages' sources at HEAD", () => {
+    const command = includeTargetsCommand(["tools/ci", "tools/eval"]);
+    expect(command).toContain("git grep");
+    expect(command).toContain("HEAD -- tools/ci tools/eval");
+    expect(command).not.toContain("cargo tree");
+  });
+
   it("hashes the workspace files, the source trees and the toolchain", () => {
     const command = keyMaterialCommand({
       pkg: "contextful-ci",
@@ -108,7 +146,9 @@ describe("prebuilt binary key", () => {
   });
 });
 
-describe("prebuiltCommand", () => {
+// Each case spawns a freshly written executable, whose first run macOS can hold
+// for several seconds while it assesses the file.
+describe("prebuiltCommand", { timeout: 30_000 }, () => {
   const run = (command: string) => execFileSync("sh", ["-c", command], { encoding: "utf8" }).trim();
   const scratch = () => mkdtempSync(join(tmpdir(), "prebuilt-"));
   const tool = (dir: string, body: string) => {
@@ -143,6 +183,7 @@ describe("prebuiltCommand", () => {
 describe("prebuildCargoBinary", () => {
   const program = (build: { exitCode: number }) => ({
     "cargo tree": { stdout: TREE, exitCode: 0 },
+    "git grep": { stdout: INCLUDES, exitCode: 0 },
     [KEY_SUM]: { stdout: `${DIGEST}  /tmp/flare-dispatch-prebuilt-key.txt\n`, exitCode: 0 },
     "cargo build": build,
   });
@@ -150,11 +191,13 @@ describe("prebuildCargoBinary", () => {
     hit: boolean;
     build?: { exitCode: number };
     tree?: { stdout: string; exitCode: number };
+    includes?: { stdout: string; exitCode: number };
   }) => {
     const { layer, handles } = makeCFRuntimeTest({
       sandboxProgram: {
         ...program(opts.build ?? { exitCode: 0 }),
         ...(opts.tree !== undefined ? { "cargo tree": opts.tree } : {}),
+        ...(opts.includes !== undefined ? { "git grep": opts.includes } : {}),
       },
     });
     const cache = recordingCache(opts.hit);
@@ -179,6 +222,27 @@ describe("prebuildCargoBinary", () => {
       },
     ]);
     expect(handles.sandbox.execs.some((exec) => exec.command.includes("cargo build"))).toBe(false);
+  });
+
+  it("keys the binary by the files its sources include", async () => {
+    const { run, handles } = prebuild({ hit: true });
+    await Effect.runPromise(run);
+    const key = handles.sandbox.execs.find((exec) => exec.command.includes(KEY_SUM));
+    expect(key?.command).toContain(`${MANIFEST} crates/contextful-core tools/ci tools/eval`);
+  });
+
+  it("answers null without touching the cache when an include target cannot be keyed", async () => {
+    for (const includes of [
+      {
+        stdout: 'HEAD:tools/ci/src/a.rs:include_str!(concat!(env!("OUT_DIR"), "/x"))',
+        exitCode: 0,
+      },
+      { stdout: "", exitCode: 2 },
+    ]) {
+      const { run, cache } = prebuild({ hit: true, includes });
+      expect(await Effect.runPromise(run)).toBeNull();
+      expect(cache.calls).toEqual([]);
+    }
   });
 
   it("builds and stores the binary on a miss", async () => {

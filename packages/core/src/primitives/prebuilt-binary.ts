@@ -3,9 +3,17 @@
 // A fan-out gate whose every child starts with `cargo run -p <tool>` compiles the
 // same tool once per child. `prebuildCargoBinary` builds it once, in the parent's
 // checkout, and stores the single executable in the R2 cache under a key derived
-// from every input that decides its bytes. A child restores it with
+// from its sources, workspace files and toolchain. A child restores it with
 // `restorePrebuilt` and runs it through `prebuiltCommand`, which falls back to the
 // original `cargo run` whenever the restored file is absent or does not execute.
+//
+// The key material is the git object ids of the workspace files Cargo reads
+// ({@link KEY_FILES}), of every path package's directory `cargo tree` lists and
+// of every file those packages' sources name in a literal `include_str!` or
+// `include_bytes!`, then the compiler and Cargo versions. An include whose
+// argument is not a plain string literal, or a path package or include target
+// outside the checkout, leaves the binary unkeyed and uncached. Files a build
+// script reads outside its package directory are not key material.
 //
 // The archive holds one executable, outside the checkout, never a `target/`
 // directory — the size and eviction reasons are in install-cached.ts.
@@ -90,9 +98,59 @@ export const parsePathPackages = (stdout: string, dir: string): readonly string[
   return dirs.size === 0 ? undefined : [...dirs].sort();
 };
 
+/** `target` resolved against the directory `from`, or `undefined` when it climbs above the root. */
+const resolveRelative = (from: readonly string[], target: string): string | undefined => {
+  const out = [...from];
+  for (const segment of target.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (out.pop() === undefined) return undefined;
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.length === 0 ? undefined : out.join("/");
+};
+
+const INCLUDE_PATTERN = /include_(?:str|bytes)!\s*\(\s*/g;
+
+/**
+ * The checkout-relative files every `include_str!`/`include_bytes!` names, from
+ * `git grep HEAD` output, each resolved against its source file's directory as
+ * rustc resolves it; sorted, without duplicates. `undefined` when an argument is
+ * not a plain string literal, or a target lies outside the checkout or carries a
+ * character the key command does not admit.
+ */
+export const parseIncludeTargets = (stdout: string): readonly string[] | undefined => {
+  const targets = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^HEAD:([^:]+):(.*)$/.exec(line);
+    if (match === null) continue;
+    const file = match[1]!;
+    const source = match[2]!;
+    if (!REL_DIR_PATTERN.test(file) || file.split("/").includes("..")) return undefined;
+    for (const include of source.matchAll(INCLUDE_PATTERN)) {
+      const rest = source.slice(include.index + include[0].length);
+      const literal = /^"([^"\\]*)"\s*\)/.exec(rest);
+      if (literal === null || literal[1]!.startsWith("/")) return undefined;
+      const resolved = resolveRelative(file.split("/").slice(0, -1), literal[1]!);
+      if (resolved === undefined || !REL_DIR_PATTERN.test(resolved)) return undefined;
+      targets.add(resolved);
+    }
+  }
+  return [...targets].sort();
+};
+
+/**
+ * The shell command that prints every line of the path packages' sources at
+ * `HEAD` that names `include_str!` or `include_bytes!`. No match exits 0.
+ */
+export const includeTargetsCommand = (dirs: readonly string[]): string =>
+  `git grep -E 'include_(str|bytes)!' HEAD -- ${dirs.join(" ")} || [ $? -eq 1 ]`;
+
 /**
  * The shell command that writes the key material and prints its SHA-256: the
- * git object ids of {@link KEY_FILES} and every source directory at `HEAD`, then
+ * git object ids of {@link KEY_FILES} and every source path at `HEAD`, then
  * the compiler and Cargo versions. Git object ids are content hashes, so two
  * checkouts with identical sources share a key whatever their commit.
  */
@@ -173,7 +231,18 @@ export const prebuildCargoBinary = (opts: {
     if (dirs === undefined)
       return yield* unavailable(`cargo tree for ${opts.pkg} named no keyable path package`);
 
-    const digest = yield* run(keyMaterialCommand({ pkg: opts.pkg, bin: opts.bin, dirs }), 120);
+    const grep = yield* run(includeTargetsCommand(dirs), 120);
+    const includes = grep.exitCode === 0 ? parseIncludeTargets(grep.stdout) : undefined;
+    if (includes === undefined)
+      return yield* unavailable(
+        `an include_str!/include_bytes! target of ${opts.pkg} is not keyable`,
+      );
+
+    const paths = [...new Set([...dirs, ...includes])].sort();
+    const digest = yield* run(
+      keyMaterialCommand({ pkg: opts.pkg, bin: opts.bin, dirs: paths }),
+      120,
+    );
     const key = digest.exitCode === 0 ? prebuiltKey(opts.bin, digest.stdout) : undefined;
     if (key === undefined) return yield* unavailable("the key material could not be hashed");
 
