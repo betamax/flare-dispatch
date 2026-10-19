@@ -31,6 +31,8 @@ const TREE = [
 const KEY_SUM = "sha256sum /tmp/flare-dispatch-prebuilt-key.txt";
 const MANIFEST = "crates/acceptance/src/conformance/manifest.json";
 const INCLUDES = `HEAD:tools/ci/src/release.rs:    let registry = from_str(include_str!("../../../${MANIFEST}"))?;\n`;
+const INCLUDED_SOURCE = "shared/generated.rs";
+const SOURCE_INCLUDE = `HEAD:tools/ci/src/main.rs:include!("../../../${INCLUDED_SOURCE}");\n`;
 
 /** A cache that answers every restore with `hit` and records what reached it. */
 const recordingCache = (hit: boolean) => {
@@ -75,17 +77,18 @@ describe("prebuilt binary key", () => {
     expect(parsePathPackages("x v0.1.0 (/workspace/contextful/a/../b)", DIR)).toBeUndefined();
   });
 
-  it("keys every literal include_str!/include_bytes! target, resolved from its source file", () => {
+  it("keys every literal include target, resolved from its source file", () => {
     expect(parseIncludeTargets(INCLUDES)).toEqual([MANIFEST]);
     expect(
       parseIncludeTargets(
         [
           'HEAD:tools/ci/src/a.rs:#[doc = include_str!("../README.md")]',
           'HEAD:tools/ci/src/b.rs:const X: &[u8] = include_bytes!( "./data/x.bin" ); include_str!("../README.md")',
+          SOURCE_INCLUDE.trimEnd(),
           "HEAD:tools/ci/src/c.rs:no include here",
         ].join("\n"),
       ),
-    ).toEqual(["tools/ci/README.md", "tools/ci/src/data/x.bin"]);
+    ).toEqual([INCLUDED_SOURCE, "tools/ci/README.md", "tools/ci/src/data/x.bin"]);
     expect(parseIncludeTargets("")).toEqual([]);
   });
 
@@ -100,11 +103,18 @@ describe("prebuilt binary key", () => {
       parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!(concat!(env!("OUT_DIR"), "/x"))'),
     ).toBeUndefined();
     expect(parseIncludeTargets('HEAD:tools/ci/src/a.rs:include_str!("a b")')).toBeUndefined();
+    expect(
+      parseIncludeTargets('HEAD:tools/ci/src/a.rs:include!(concat!("../", "b.rs"))'),
+    ).toBeUndefined();
+    expect(
+      parseIncludeTargets('HEAD:tools/ci/src/a.rs:include!("../../../../outside.rs")'),
+    ).toBeUndefined();
   });
 
   it("searches only the path packages' sources at HEAD", () => {
     const command = includeTargetsCommand(["tools/ci", "tools/eval"]);
     expect(command).toContain("git grep");
+    expect(command).toContain("include(_(str|bytes))?!");
     expect(command).toContain("HEAD -- tools/ci tools/eval");
     expect(command).not.toContain("cargo tree");
   });
@@ -225,10 +235,15 @@ describe("prebuildCargoBinary", () => {
   });
 
   it("keys the binary by the files its sources include", async () => {
-    const { run, handles } = prebuild({ hit: true });
+    const { run, handles } = prebuild({
+      hit: true,
+      includes: { stdout: INCLUDES + SOURCE_INCLUDE, exitCode: 0 },
+    });
     await Effect.runPromise(run);
     const key = handles.sandbox.execs.find((exec) => exec.command.includes(KEY_SUM));
-    expect(key?.command).toContain(`${MANIFEST} crates/contextful-core tools/ci tools/eval`);
+    expect(key?.command).toContain(
+      `${MANIFEST} crates/contextful-core ${INCLUDED_SOURCE} tools/ci tools/eval`,
+    );
   });
 
   it("answers null without touching the cache when an include target cannot be keyed", async () => {
@@ -237,6 +252,7 @@ describe("prebuildCargoBinary", () => {
         stdout: 'HEAD:tools/ci/src/a.rs:include_str!(concat!(env!("OUT_DIR"), "/x"))',
         exitCode: 0,
       },
+      { stdout: 'HEAD:tools/ci/src/a.rs:include!(concat!("../", "b.rs"))', exitCode: 0 },
       { stdout: "", exitCode: 2 },
     ]) {
       const { run, cache } = prebuild({ hit: true, includes });

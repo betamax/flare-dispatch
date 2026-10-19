@@ -9,8 +9,9 @@
 //
 // The key material is the git object ids of the workspace files Cargo reads
 // ({@link KEY_FILES}), of every path package's directory `cargo tree` lists and
-// of every file those packages' sources name in a literal `include_str!` or
-// `include_bytes!`, then the compiler and Cargo versions. An include whose
+// of every file those packages' sources name in a literal `include!`,
+// `include_str!` or `include_bytes!`, then the compiler and Cargo versions.
+// An include whose
 // argument is not a plain string literal, or a path package or include target
 // outside the checkout, leaves the binary unkeyed and uncached. Files a build
 // script reads outside its package directory are not key material.
@@ -112,10 +113,10 @@ const resolveRelative = (from: readonly string[], target: string): string | unde
   return out.length === 0 ? undefined : out.join("/");
 };
 
-const INCLUDE_PATTERN = /include_(?:str|bytes)!\s*\(\s*/g;
+const INCLUDE_PATTERN = /include(?:_(?:str|bytes))?!\s*\(\s*/g;
 
 /**
- * The checkout-relative files every `include_str!`/`include_bytes!` names, from
+ * The checkout-relative files every `include!`/`include_str!`/`include_bytes!` names, from
  * `git grep HEAD` output, each resolved against its source file's directory as
  * rustc resolves it; sorted, without duplicates. `undefined` when an argument is
  * not a plain string literal, or a target lies outside the checkout or carries a
@@ -143,10 +144,10 @@ export const parseIncludeTargets = (stdout: string): readonly string[] | undefin
 
 /**
  * The shell command that prints every line of the path packages' sources at
- * `HEAD` that names `include_str!` or `include_bytes!`. No match exits 0.
+ * `HEAD` that names `include!`, `include_str!` or `include_bytes!`. No match exits 0.
  */
 export const includeTargetsCommand = (dirs: readonly string[]): string =>
-  `git grep -E 'include_(str|bytes)!' HEAD -- ${dirs.join(" ")} || [ $? -eq 1 ]`;
+  `git grep -E 'include(_(str|bytes))?!' HEAD -- ${dirs.join(" ")} || [ $? -eq 1 ]`;
 
 /**
  * The shell command that writes the key material and prints its SHA-256: the
@@ -235,7 +236,7 @@ export const prebuildCargoBinary = (opts: {
     const includes = grep.exitCode === 0 ? parseIncludeTargets(grep.stdout) : undefined;
     if (includes === undefined)
       return yield* unavailable(
-        `an include_str!/include_bytes! target of ${opts.pkg} is not keyable`,
+        `an include!/include_str!/include_bytes! target of ${opts.pkg} is not keyable`,
       );
 
     const paths = [...new Set([...dirs, ...includes])].sort();
