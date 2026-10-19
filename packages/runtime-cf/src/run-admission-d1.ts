@@ -61,21 +61,35 @@ export const resolveAdmissionCap = (raw: string | undefined): number => {
 export const RELEASE_ADMISSION_CAP_DEFAULT = 8;
 
 /**
- * The slot cap for one pool. `ADMISSION_CAP` bounds every pool; the release
- * pool is further bounded by `ADMISSION_CAP_RELEASE` (default
- * {@link RELEASE_ADMISSION_CAP_DEFAULT}), so its cap is the smaller of the two.
- * Every other pool keeps `ADMISSION_CAP` alone. Garbage degrades to the
- * default, as in {@link resolveAdmissionCap}.
+ * The agent pool's slot cap when `ADMISSION_CAP_AGENT` is unset — the
+ * `RunSandboxAgent` container's `max_instances: 8` in wrangler.jsonc.
  */
-export const resolvePoolAdmissionCap = (
-  pool: AdmissionPool,
-  vars: { readonly ADMISSION_CAP?: string; readonly ADMISSION_CAP_RELEASE?: string },
-): number => {
+export const AGENT_ADMISSION_CAP_DEFAULT = 8;
+
+/** The admission vars a pool's cap reads. */
+export type AdmissionCapVars = {
+  readonly ADMISSION_CAP?: string;
+  readonly ADMISSION_CAP_AGENT?: string;
+  readonly ADMISSION_CAP_RELEASE?: string;
+};
+
+/**
+ * The slot cap for one pool. `ADMISSION_CAP` bounds every pool; the agent and
+ * release pools, whose containers are fewer, are further bounded by
+ * `ADMISSION_CAP_AGENT` and `ADMISSION_CAP_RELEASE` (defaults
+ * {@link AGENT_ADMISSION_CAP_DEFAULT}, {@link RELEASE_ADMISSION_CAP_DEFAULT}),
+ * so their cap is the smaller of the two. Lean and browser keep
+ * `ADMISSION_CAP` alone. Garbage degrades to the default, as in
+ * {@link resolveAdmissionCap}.
+ */
+export const resolvePoolAdmissionCap = (pool: AdmissionPool, vars: AdmissionCapVars): number => {
   const shared = resolveAdmissionCap(vars.ADMISSION_CAP);
-  if (pool !== "release") return shared;
-  const parsed = vars.ADMISSION_CAP_RELEASE === undefined ? NaN : Number.parseInt(vars.ADMISSION_CAP_RELEASE, 10);
-  const release = Number.isInteger(parsed) && parsed > 0 ? parsed : RELEASE_ADMISSION_CAP_DEFAULT;
-  return Math.min(shared, release);
+  const own = pool === "release" ? { raw: vars.ADMISSION_CAP_RELEASE, fallback: RELEASE_ADMISSION_CAP_DEFAULT }
+    : pool === "agent" ? { raw: vars.ADMISSION_CAP_AGENT, fallback: AGENT_ADMISSION_CAP_DEFAULT }
+    : undefined;
+  if (own === undefined) return shared;
+  const parsed = own.raw === undefined ? NaN : Number.parseInt(own.raw, 10);
+  return Math.min(shared, Number.isInteger(parsed) && parsed > 0 ? parsed : own.fallback);
 };
 
 /**

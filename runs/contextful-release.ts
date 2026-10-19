@@ -52,8 +52,14 @@ const CELL_QUEUE_SEC = 21600;
 export const RELEASE_WINDOW = 8;
 /** Status-poll cadence while the window is full. */
 const RELEASE_POLL_EVERY = "30 seconds";
-/** A spawned cell's whole budget: its queue age plus its run ceiling. */
-const CELL_BUDGET_MS = (CELL_QUEUE_SEC + CELL_MAX_DURATION_SEC) * 1000;
+/**
+ * What a cell spends outside its queue age and run ceiling: the 600 s
+ * container-lease wait before its ceiling starts, then teardown and the
+ * terminal-row write after it ends, and the parent's next poll.
+ */
+const CELL_SETTLE_MARGIN_SEC = 1800;
+/** A spawned cell's whole budget: queue age, run ceiling, and the settle margin. */
+const CELL_BUDGET_MS = (CELL_QUEUE_SEC + CELL_MAX_DURATION_SEC + CELL_SETTLE_MARGIN_SEC) * 1000;
 /**
  * Spawn order, longest cells first: `full` links DuckDB and wasmtime, `edge`
  * DuckDB, `control` neither. The two short `control` cells take the first
@@ -343,13 +349,15 @@ export const contextfulRelease = defineRun({
     const queue = [...SPAWN_ORDER];
     const running: { readonly index: number; readonly id: string; readonly expiresAt: number }[] = [];
     const settledByCell = new Map<number, ChildStatusRecord>();
+    const timedOut = new Set<number>();
     const cellFailed = (child: ChildStatusRecord) => child.status !== "success" || !child.summaryJson;
     let spawned = 0;
     for (let round = 0; queue.length > 0 || running.length > 0; round++) {
-      const failed = [...settledByCell.values()].some(cellFailed);
+      const failed = timedOut.size > 0 || [...settledByCell.values()].some(cellFailed);
       const free = RELEASE_WINDOW - running.length;
-      // After a failure no further cell starts; the running ones settle so the
-      // verdict names every failed cell.
+      // After a failure no further cell starts; the running ones settle or
+      // outlive their budget, so the verdict names every failed cell. They
+      // write to the same draft release, so the parent never ends before them.
       if (!failed && queue.length > 0 && free > 0) {
         const batch = queue.splice(0, free);
         const { handles, spawnedAt } = yield* step(`spawn-cells-${spawned}`, () => Effect.gen(function* () {
@@ -368,16 +376,25 @@ export const contextfulRelease = defineRun({
           expiresAt: spawnedAt + CELL_BUDGET_MS,
         }));
         spawned += batch.length;
-      } else if (failed) {
-        queue.length = 0;
-        if (running.length === 0) break;
+      } else if (failed && running.length === 0) {
+        break;
       }
+      const expiresAt = Math.min(...running.map((cell) => cell.expiresAt));
       const records = yield* waitForAnyChildDurably({
         name: `await-cells-${round}`,
         ids: running.map((cell) => cell.id),
-        expiresAt: Math.min(...running.map((cell) => cell.expiresAt)),
+        expiresAt,
         pollEvery: RELEASE_POLL_EVERY,
-      });
+      }).pipe(Effect.catchTag("ChildWaitTimeout", () => Effect.succeed(undefined)));
+      if (records === undefined) {
+        // The cells whose budget ended this wait count as failed; the rest keep running.
+        for (let slot = running.length - 1; slot >= 0; slot--) {
+          if (running[slot]!.expiresAt > expiresAt) continue;
+          timedOut.add(running[slot]!.index);
+          running.splice(slot, 1);
+        }
+        continue;
+      }
       for (let slot = running.length - 1; slot >= 0; slot--) {
         const record = records.find((child) => child.executionId === running[slot]!.id);
         if (record === undefined || !isTerminalChildStatus(record.status)) continue;
@@ -389,9 +406,17 @@ export const contextfulRelease = defineRun({
       const child = settledByCell.get(index);
       return child !== undefined && cellFailed(child);
     });
-    if (failedCells.length > 0) {
-      return yield* Effect.die(new Error(`release cells failed: ${
-        failedCells.map((cell) => `${cell.profile}/${cell.target}`).join(", ")}`));
+    if (failedCells.length > 0 || timedOut.size > 0) {
+      const names = (cells: readonly { readonly profile: string; readonly target: string }[]) =>
+        cells.map((cell) => `${cell.profile}/${cell.target}`).join(", ");
+      const verdict = [
+        ["failed", failedCells],
+        ["timed out", CELLS.filter((_, index) => timedOut.has(index))],
+        ["not started", queue],
+      ] as const;
+      return yield* Effect.die(new Error(`release cells ${verdict
+        .filter(([, cells]) => cells.length > 0)
+        .map(([label, cells]) => `${label}: ${names(cells)}`).join("; ")}`));
     }
     // Matrix order, whatever order the cells settled in.
     const children = CELLS.flatMap((_, index) => settledByCell.get(index) ?? []);

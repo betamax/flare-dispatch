@@ -1,7 +1,7 @@
 import { it } from "@effect/vitest";
 import { Cause, Effect, Exit, Fiber, TestClock } from "effect";
 import { describe, expect } from "vitest";
-import { IO, Sandbox, StepRunner, type CheckCommandService } from "@fractalboxdev/flare-dispatch-core";
+import { ChildRuns, IO, Sandbox, StepRunner, type CheckCommandService } from "@fractalboxdev/flare-dispatch-core";
 import { makeCFRuntimeTest } from "@fractalboxdev/flare-dispatch-core/testing";
 import { contextfulRelease, contextfulReleaseCell, RELEASE_WINDOW, SPAWN_ORDER } from "./contextful-release";
 
@@ -204,24 +204,27 @@ describe("contextful-release", () => {
    * spawned input, and whose formula child succeeds. Sleeps advance a clock
    * and are recorded, so a wait's cadence is observable.
    */
-  const releaseFixture = (status: (cell: Cell, poll: number) => "running" | "success" | "failure") => {
+  const releaseFixture = (
+    status: (cell: Cell, poll: number, now: number) => "running" | "success" | "failure",
+    existing: readonly string[] = [],
+  ) => {
     let spawned: readonly { readonly input: unknown; readonly instanceId: string }[] = [];
+    let now = 0;
     const runtime = makeCFRuntimeTest({
       github: { files: { [`${repo}:Cargo.toml`]: '[workspace.package]\nversion = "0.5.0"\n' } },
-      childRuns: { pollFn: (ids, poll) => ids.map((id) => {
+      childRuns: { existing, pollFn: (ids, poll) => ids.map((id) => {
         if (id.startsWith("contextful-release-formula")) {
           return { executionId: id, status: "success", summaryJson: JSON.stringify({ assets: FORMULA_ASSETS }) };
         }
         const { profile, target } = spawned.find((child) => child.instanceId === id)!.input as Cell;
         const cell = { profile, target };
-        const verdict = status(cell, poll);
+        const verdict = status(cell, poll, now);
         return verdict === "success"
           ? { executionId: id, status: verdict, summaryJson: cellOutput(cell) }
           : { executionId: id, status: verdict };
       }) },
     });
     spawned = runtime.handles.childRuns.spawned;
-    let now = 0;
     const sleeps: { name: string; ms: number }[] = [];
     const provideClock = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.gen(function* () {
       const runner = yield* StepRunner;
@@ -329,6 +332,54 @@ describe("contextful-release", () => {
       const steps = stepNames(handles);
       expect(steps.some((name) => /^(spawn|await)-release-cells-/.test(name))).toBe(false);
       expect(steps).toEqual(expect.arrayContaining(["spawn-cells-0", "handoff-admission", "await-cells-0-poll-0"]));
+    }).pipe(Effect.provide(layer));
+  });
+  it.effect("a cell that outlives its budget after another failed ends the release naming the failure, the hang and the unstarted cells", () => {
+    const { layer, provideClock } = releaseFixture((cell, poll) =>
+      cell.profile === "contextful-full" && cell.target === "x86_64-unknown-linux-musl" ? "failure"
+        : cell.profile === "contextful-edge" && cell.target === "aarch64-apple-darwin" ? "running"
+          : poll >= 2 ? "success" : "running");
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(provideClock(contextfulRelease.run({ repo, tag: "v0.5.0", sha, dryRun: true })));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain("release cells failed: contextful-full/x86_64-unknown-linux-musl; "
+          + "timed out: contextful-edge/aarch64-apple-darwin; "
+          + "not started: contextful-control/x86_64-unknown-linux-musl, contextful-control/aarch64-unknown-linux-musl");
+      }
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("a cell that settles after its queue age and run ceiling, inside its lease wait and teardown, is observed", () => {
+    // The child's ceiling starts after admission and the lease, and its row
+    // lands after teardown: a cell using its whole allowance settles after
+    // queue age + run ceiling measured from the parent's spawn.
+    const allowance = (21600 + 2 * 14400 + 3600 + 600 + 60) * 1000;
+    const { layer, provideClock } = releaseFixture((cell, _poll, now) =>
+      cell.profile === "contextful-full" && cell.target === "x86_64-unknown-linux-musl" && now < allowance
+        ? "running" : "success");
+    return Effect.gen(function* () {
+      const result = yield* provideClock(contextfulRelease.run({ repo, tag: "v0.5.0", sha, dryRun: true }));
+      expect(result).toMatchObject({ cells: 10, assets: 36 });
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("a release in flight across the deploy re-attaches the children its fixed batches spawned", () => {
+    // The live layer derives a child's instance id from its input; the fixed
+    // batches spawned the first three matrix cells from this input shape.
+    const derive = (input: unknown) => `contextful-release-cell.${JSON.stringify(input)}`;
+    const batchZero = MATRIX.slice(0, 3).map((cell) =>
+      derive({ ...cell, repo, tag: "v0.5.0", sha, releaseId: 0, dryRun: true }));
+    const { layer, handles } = releaseFixture(() => "success", batchZero);
+    return Effect.gen(function* () {
+      const children = yield* ChildRuns;
+      const result = yield* contextfulRelease.run({ repo, tag: "v0.5.0", sha, dryRun: true }).pipe(
+        Effect.provideService(ChildRuns, { ...children, spawn: (opts) => children.spawn({ ...opts,
+          instanceId: opts.instanceId ?? (opts.run === "contextful-release-cell" ? derive(opts.input) : undefined) }) }));
+      expect(result).toMatchObject({ cells: 10 });
+      const cells = handles.childRuns.spawned.filter((child) => child.run === "contextful-release-cell");
+      expect(cells).toHaveLength(10);
+      expect(cells.filter((child) => !child.created).map((child) => child.instanceId).sort()).toEqual([...batchZero].sort());
     }).pipe(Effect.provide(layer));
   });
 });
