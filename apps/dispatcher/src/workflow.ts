@@ -85,7 +85,7 @@ import {
   makeWritebackTokenMinter,
   previewSafeSandboxId,
   recordExecutionCost,
-  resolveAdmissionCap,
+  resolvePoolAdmissionCap,
   runSerialGate,
   runWriteback,
   type WritebackOutcome,
@@ -363,10 +363,11 @@ export class RunWorkflow extends WorkflowEntrypoint<Env> {
       agent: this.env.RUNS_SANDBOX_AGENT !== undefined ? "agent" : undefined,
       release: this.env.RUNS_SANDBOX_RELEASE !== undefined ? "release" : undefined,
     });
-    // The per-pool slot cap, from the plain `ADMISSION_CAP` wrangler var
-    // (one var for both pools; keep it ≤ each container's `max_instances` —
-    // see the paired comments in wrangler.jsonc). Unset/unparsable → 16.
-    const admissionCap = resolveAdmissionCap(this.env.ADMISSION_CAP);
+    // The pool's slot cap: the plain `ADMISSION_CAP` wrangler var for every
+    // pool (keep it ≤ each container's `max_instances` — see the paired
+    // comments in wrangler.jsonc; unset/unparsable → 16), and for the release
+    // pool the smaller of that and `ADMISSION_CAP_RELEASE` (unset → 8).
+    const admissionCap = resolvePoolAdmissionCap(admissionPool, this.env);
 
     // Build the per-execution live runtime: D1 + R2 + Containers + Checks, with
     // `StepRunner` bound to *this* Workflow's `step` so each `step(...)` in the

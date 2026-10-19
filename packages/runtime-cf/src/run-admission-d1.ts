@@ -53,6 +53,32 @@ export const resolveAdmissionCap = (raw: string | undefined): number => {
 };
 
 /**
+ * The release pool's slot cap when `ADMISSION_CAP_RELEASE` is unset — the
+ * `RunSandboxRelease` container's `max_instances: 8` in wrangler.jsonc. Under
+ * the shared cap of 16, two concurrent releases admit 16 cells onto 8
+ * containers and the excess fail `ContainerLaunchFailed`.
+ */
+export const RELEASE_ADMISSION_CAP_DEFAULT = 8;
+
+/**
+ * The slot cap for one pool. `ADMISSION_CAP` bounds every pool; the release
+ * pool is further bounded by `ADMISSION_CAP_RELEASE` (default
+ * {@link RELEASE_ADMISSION_CAP_DEFAULT}), so its cap is the smaller of the two.
+ * Every other pool keeps `ADMISSION_CAP` alone. Garbage degrades to the
+ * default, as in {@link resolveAdmissionCap}.
+ */
+export const resolvePoolAdmissionCap = (
+  pool: AdmissionPool,
+  vars: { readonly ADMISSION_CAP?: string; readonly ADMISSION_CAP_RELEASE?: string },
+): number => {
+  const shared = resolveAdmissionCap(vars.ADMISSION_CAP);
+  if (pool !== "release") return shared;
+  const parsed = vars.ADMISSION_CAP_RELEASE === undefined ? NaN : Number.parseInt(vars.ADMISSION_CAP_RELEASE, 10);
+  const release = Number.isInteger(parsed) && parsed > 0 ? parsed : RELEASE_ADMISSION_CAP_DEFAULT;
+  return Math.min(shared, release);
+};
+
+/**
  * Delay between claim attempts while the pool is full. Each wait is a
  * durable `step.sleep`, so a queued run costs nothing while it waits; 20s
  * keeps the loop ≤270 claim steps + 270 sleeps over the largest run override
