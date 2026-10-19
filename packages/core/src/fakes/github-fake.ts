@@ -20,6 +20,7 @@ import { GitHubApiError } from "../errors";
 import {
   type CloseBotIssue,
   type CloseBotIssueResult,
+  type CommitPullRequest,
   type CloseDraftPullRequest,
   type CloseDraftPullRequestResult,
   type CreateRelease,
@@ -58,6 +59,13 @@ export type GithubFakeState = {
   branchHeads: Record<string, string>;
   /** Every `branchHead` call, in order. */
   readonly branchHeadCalls: Array<{ repo: string; branch: string }>;
+  /**
+   * Seeded answers to `commitPullRequests`, keyed `"owner/name:sha"`. An
+   * unseeded commit FAILS, as an unreadable live answer does.
+   */
+  commitPullRequests: Record<string, readonly CommitPullRequest[]>;
+  /** Every `commitPullRequests` call, in order. */
+  readonly commitPullRequestsCalls: Array<{ repo: string; sha: string }>;
   readonly appendMeasureNoteCalls: Array<{ repo: string; commit: string; text: string }>;
   /** Every `issues` call, in order. */
   readonly issuesCalls: Array<{
@@ -164,6 +172,8 @@ export const makeGithubFake = (
     files?: Record<string, string>;
     /** Branch heads keyed `"owner/name:branch"`; an unseeded branch fails. */
     branchHeads?: Record<string, string>;
+    /** Commit → PRs keyed `"owner/name:sha"`; an unseeded commit fails. */
+    commitPullRequests?: Record<string, readonly CommitPullRequest[]>;
     /** Clock used to evaluate `pushedWithinDays` / `updatedWithinHours`. */
     now?: number;
     /**
@@ -189,6 +199,8 @@ export const makeGithubFake = (
     files: { ...opts.files },
     branchHeads: { ...opts.branchHeads },
     branchHeadCalls: [],
+    commitPullRequests: { ...opts.commitPullRequests },
+    commitPullRequestsCalls: [],
     appendMeasureNoteCalls: [],
     issuesCalls: [],
     actionRunsCalls: [],
@@ -419,6 +431,15 @@ export const makeGithubFake = (
         return sha === undefined
           ? Effect.fail(new GitHubApiError({ status: 404, reason: "other" }))
           : Effect.succeed(sha);
+      }),
+
+    commitPullRequests: ({ repo, sha }): Effect.Effect<readonly CommitPullRequest[], GitHubApiError> =>
+      Effect.suspend(() => {
+        state.commitPullRequestsCalls.push({ repo, sha });
+        const prs = state.commitPullRequests[`${repo}:${sha}`];
+        return prs === undefined
+          ? Effect.fail(new GitHubApiError({ status: 404, reason: "other" }))
+          : Effect.succeed(prs);
       }),
 
     appendMeasureNote: ({ repo, commit, text }) =>

@@ -112,6 +112,22 @@ describe("makeRunSupersedeD1: supersession against real D1", () => {
     });
   });
 
+  it("a close marker ranked at the close ends the group's gates; only a reopen outranks it", async () => {
+    await run(store.register("gate-push", G, { supersedeOlder: true, rank: 1_000 }));
+    clock += 1;
+    // The close lands at the PR's `updated_at`, after the landing push.
+    expect(await superseded("pr-closed:1500:g", G, { supersedeOlder: true, rank: 1_500 })).toEqual(["gate-push"]);
+    clock += 1;
+    // A gate for the closed head that registers late stands itself down.
+    expect(await run(store.register("gate-late", G, { supersedeOlder: true, rank: 1_000 }))).toEqual({
+      superseded: [],
+      supersededBy: "pr-closed:1500:g",
+    });
+    clock += 1;
+    // A reopen's revision ranks above the close and supersedes the marker.
+    expect(await superseded("gate-reopen", G, { supersedeOlder: true, rank: 2_000 })).toContain("pr-closed:1500:g");
+  });
+
   it("a re-run with a lower rank joins without standing down", async () => {
     await run(store.register("gate-h2", G, { supersedeOlder: true, rank: 2_000 }));
     clock += 1;

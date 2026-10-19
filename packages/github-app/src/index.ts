@@ -73,6 +73,12 @@ export {
   type ReadRepoTextFileResult,
 } from "./repo-files";
 export { readBranchHead, branchRefUrl, type ReadBranchHeadOptions } from "./branch-head";
+export {
+  commitPullsUrl,
+  listCommitPullRequests,
+  type CommitPullRequest,
+  type ListCommitPullRequestsOptions,
+} from "./commit-pulls";
 export { appendGitNote, type AppendGitNoteOptions } from "./git-notes";
 export {
   addIssueLabels,
