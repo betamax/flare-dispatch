@@ -556,7 +556,7 @@ describe("POST /v1/webhooks/github — pull request closed", () => {
       expect(workflow.calls[0]?.params).toEqual({
         closeGroup: {
           group: `contextful-gate:${REPO}#42`,
-          rank: Date.parse("2026-10-19T10:00:05Z"),
+          rank: Date.parse("2026-10-19T10:00:05Z") + 1,
           repo: REPO,
           installation_id: 77,
         },

@@ -75,6 +75,7 @@ export {
 export { readBranchHead, branchRefUrl, type ReadBranchHeadOptions } from "./branch-head";
 export {
   commitPullsUrl,
+  getPullRequest,
   listCommitPullRequests,
   type CommitPullRequest,
   type ListCommitPullRequestsOptions,

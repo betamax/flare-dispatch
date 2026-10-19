@@ -269,14 +269,11 @@ describe("contextful-gate", () => {
       expect(handles.executions.steps.map((entry) => entry.name).filter((name) => !name.startsWith("checkout") && !name.startsWith("discover") && name !== "release-discovery-container")).toEqual([
         "prebuild-ci-binary",
         "resolve-window",
-        "check-liveness-0",
         "spawn-parts-0",
         "handoff-admission",
         "await-parts-0-poll-0",
-        "check-liveness-2",
         "spawn-parts-2",
         "await-parts-1-poll-0",
-        "check-liveness-3",
         "spawn-parts-3",
         "await-parts-2-poll-0",
       ]);
@@ -745,6 +742,9 @@ describe("contextful-gate", () => {
       expect(prLiveness(withPr, [])).toEqual({ live: true });
       // An input without `pr` gates every PR headed in the repository.
       const bare = { repo: REPO, sha: SHA };
+      // `commits/{sha}/pulls` answers [] for a commit force-pushed off every branch.
+      expect(prLiveness(bare, [])).toEqual({ live: false, reason: "head superseded" });
+      expect(prLiveness(bare, [pr({ headSha: "c".repeat(40) })])).toEqual({ live: false, reason: "head superseded" });
       expect(prLiveness(bare, [pr({ state: "closed", merged: true })])).toEqual({ live: false, reason: "pull request closed" });
       expect(prLiveness(bare, [pr({ state: "closed" }), pr({ number: 43 })])).toEqual({ live: true });
       expect(prLiveness(bare, [pr({ headRepo: "fork/contextful", state: "closed" })])).toEqual({ live: true });
@@ -769,14 +769,15 @@ describe("contextful-gate", () => {
     });
 
     it.effect("stops spawning once the pull request's head moves past the gated commit", () => {
-      const seeded: Record<string, readonly CommitPullRequest[]> = { [KEY]: [pr()] };
+      // A gate that knows its PR reads it directly: `commits/{sha}/pulls` loses
+      // a force-pushed head, `pulls/{pr}` does not.
       const { layer, handles } = makeCFRuntimeTest({
         config: { "contextful-gate.window:fractalboxdev/contextful": "1" },
         sandboxProgram: three,
-        github: { commitPullRequests: seeded },
+        github: { pullRequests: { [`${REPO}#42`]: pr() }, commitPullRequests: { [KEY]: [] } },
         childRuns: {
           pollFn: (ids) => {
-            handles.github.commitPullRequests[KEY] = [pr({ headSha: "c".repeat(40) })];
+            handles.github.pullRequests[`${REPO}#42`] = pr({ headSha: "c".repeat(40) });
             return ids.map((executionId) => ({ executionId, status: "success" }));
           },
         },
@@ -789,8 +790,62 @@ describe("contextful-gate", () => {
         expect(cancelledChecks(handles).map((check) => check.name)).toEqual([
           "flare-dispatch/check:workspace.compile", "flare-dispatch/check:formal",
         ]);
-        expect(handles.github.commitPullRequestsCalls).toHaveLength(2);
+        expect(handles.github.pullRequestCalls).toEqual([{ repo: REPO, number: 42 }, { repo: REPO, number: 42 }]);
+        expect(handles.github.commitPullRequestsCalls).toEqual([]);
       }).pipe(Effect.provide(layer));
+    });
+
+    it.effect("spawns nothing for an input without `pr` whose commit no pull request holds", () => {
+      const { layer, handles } = makeCFRuntimeTest({
+        sandboxProgram: three,
+        github: { commitPullRequests: { [KEY]: [] } },
+      });
+      return Effect.gen(function* () {
+        const exit = yield* Effect.exit(contextfulGate.run(input));
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("head superseded — 3 of 3 parts not run");
+        expect(handles.childRuns.spawned).toHaveLength(0);
+      }).pipe(Effect.provide(layer));
+    });
+
+    it.effect("reads liveness inside each spawn checkpoint, never in a step of its own", () => {
+      // An instance whose `spawn-parts-0` was cached before the read existed
+      // replays that spawn before any fresh read, so a stop never re-posts a
+      // part it already spawned as not run.
+      const { layer, handles } = makeCFRuntimeTest({
+        config: { "contextful-gate.window:fractalboxdev/contextful": "1" },
+        sandboxProgram: three,
+        github: { pullRequests: { [`${REPO}#42`]: pr() } },
+        childRuns: {
+          pollFn: (ids) => {
+            handles.github.pullRequests[`${REPO}#42`] = pr({ state: "closed", merged: true });
+            return ids.map((executionId) => ({ executionId, status: "success" }));
+          },
+        },
+      });
+      return Effect.gen(function* () {
+        yield* Effect.exit(contextfulGate.run({ ...input, pr: 42 }));
+        const names = handles.executions.steps.map((record) => record.name);
+        expect(names.filter((name) => name.startsWith("spawn-parts-"))).toEqual(["spawn-parts-0", "spawn-parts-1"]);
+        expect(names.some((name) => name.startsWith("check-liveness-"))).toBe(false);
+        expect(handles.childRuns.spawned).toHaveLength(1);
+        expect(cancelledChecks(handles).map((check) => check.name)).toEqual([
+          "flare-dispatch/check:workspace.compile", "flare-dispatch/check:formal",
+        ]);
+      }).pipe(Effect.provide(layer));
+    });
+
+    it("keys a reopen apart from the gate the close ended, and a redelivery onto the same key", () => {
+      const trigger = contextfulGate.triggers![0]!;
+      const payload = (action: string, updatedAt: string) => ({
+        action,
+        pull_request: { number: 42, updated_at: updatedAt, head: { sha: SHA }, base: { sha: BASE_SHA } },
+      });
+      const synchronize = trigger.idempotencyKey({ payload: payload("synchronize", "2026-10-19T10:00:00Z") });
+      const reopened = trigger.idempotencyKey({ payload: payload("reopened", "2026-10-19T11:00:00Z") });
+      expect(synchronize).toBe(`contextful-gate:42:${SHA}:${BASE_SHA}`);
+      expect(reopened).toBe(`contextful-gate:42:${SHA}:${BASE_SHA}:reopened:2026-10-19T11:00:00Z`);
+      expect(trigger.idempotencyKey({ payload: payload("reopened", "2026-10-19T11:00:00Z") })).toBe(reopened);
     });
 
     it.effect("spawns no further parts after one times out in the admission queue", () => {

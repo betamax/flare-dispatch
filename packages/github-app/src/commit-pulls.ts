@@ -1,11 +1,14 @@
-// @fractalboxdev/flare-dispatch-github-app — the pull requests a commit belongs to.
+// @fractalboxdev/flare-dispatch-github-app — a pull request's state and head.
 //
+//   GET /repos/{owner}/{repo}/pulls/{number}
 //   GET /repos/{owner}/{repo}/commits/{sha}/pulls
 //
-// A gate run asks this before each spawn: whether the pull request it was
-// started for is still open and still at the commit it gates. The answer
-// carries each PR's state, merge time and current head, which is all that
-// question needs. One page of 100 covers any commit's PR set in practice.
+// A gate run asks one of these before each spawn: whether the pull request it
+// was started for is still open and still at the commit it gates. A gate that
+// knows its PR number reads that PR directly; one that does not resolves it
+// from the commit. The commit lookup answers `[]` for a commit force-pushed off
+// every branch, so only the direct read sees a moved head in that case. One
+// page of 100 covers any commit's PR set in practice.
 //
 // Every non-2xx throws `GithubApiError`; the caller decides what an unknown
 // answer means.
@@ -56,23 +59,52 @@ export const listCommitPullRequests = async (
   if (!Array.isArray(body)) {
     throw new GithubApiError(`pull request lookup for ${opts.repo}@${opts.sha} returned no list`, res.status, "");
   }
-  return body.flatMap((raw): CommitPullRequest[] => {
-    const pr = raw as {
-      number?: unknown;
-      state?: unknown;
-      merged_at?: unknown;
-      head?: { sha?: unknown; repo?: { full_name?: unknown } | null };
-    };
-    if (typeof pr.number !== "number" || (pr.state !== "open" && pr.state !== "closed")) return [];
-    if (typeof pr.head?.sha !== "string") return [];
-    return [
-      {
-        number: pr.number,
-        state: pr.state,
-        merged: typeof pr.merged_at === "string",
-        headSha: pr.head.sha,
-        headRepo: typeof pr.head.repo?.full_name === "string" ? pr.head.repo.full_name : "",
-      },
-    ];
+  return body.flatMap((raw) => {
+    const pr = toPullRequest(raw);
+    return pr === undefined ? [] : [pr];
   });
+};
+
+/** One pull request's state and current head (`pulls/{number}`). */
+export const getPullRequest = async (opts: {
+  readonly token: string;
+  readonly repo: string;
+  readonly number: number;
+  readonly apiBase?: string;
+  readonly fetchImpl?: typeof fetch;
+}): Promise<CommitPullRequest> => {
+  if (!Number.isInteger(opts.number) || opts.number <= 0) {
+    throw new GithubApiError(`malformed pull request number "${opts.number}"`, 0, "");
+  }
+  const { owner, name } = splitRepo(opts.repo);
+  const { apiBase, doFetch } = resolveClient(opts);
+  const res = await doFetch(`${apiBase}/repos/${owner}/${name}/pulls/${opts.number}`, {
+    method: "GET",
+    headers: ghHeaders(opts.token),
+  });
+  await assertOk(res, `pull request read failed for ${opts.repo}#${opts.number}`);
+  const pr = toPullRequest(await res.json());
+  if (pr === undefined) {
+    throw new GithubApiError(`pull request read for ${opts.repo}#${opts.number} returned no pull request`, res.status, "");
+  }
+  return pr;
+};
+
+const toPullRequest = (raw: unknown): CommitPullRequest | undefined => {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const pr = raw as {
+    number?: unknown;
+    state?: unknown;
+    merged_at?: unknown;
+    head?: { sha?: unknown; repo?: { full_name?: unknown } | null };
+  };
+  if (typeof pr.number !== "number" || (pr.state !== "open" && pr.state !== "closed")) return undefined;
+  if (typeof pr.head?.sha !== "string") return undefined;
+  return {
+    number: pr.number,
+    state: pr.state,
+    merged: typeof pr.merged_at === "string",
+    headSha: pr.head.sha,
+    headRepo: typeof pr.head.repo?.full_name === "string" ? pr.head.repo.full_name : "",
+  };
 };

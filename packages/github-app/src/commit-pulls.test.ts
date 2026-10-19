@@ -3,7 +3,7 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { commitPullsUrl, GithubApiError, listCommitPullRequests } from "./index";
+import { commitPullsUrl, getPullRequest, GithubApiError, listCommitPullRequests } from "./index";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "f".repeat(40);
@@ -13,6 +13,10 @@ let respond: () => Response = () => HttpResponse.json([]);
 
 const server = setupServer(
   http.get("https://api.github.com/repos/:owner/:repo/commits/:sha/pulls", ({ request }) => {
+    requests.push({ url: new URL(request.url), authorization: request.headers.get("authorization") });
+    return respond();
+  }),
+  http.get("https://api.github.com/repos/:owner/:repo/pulls/:number", ({ request }) => {
     requests.push({ url: new URL(request.url), authorization: request.headers.get("authorization") });
     return respond();
   }),
@@ -51,5 +55,26 @@ describe("listCommitPullRequests", () => {
 
   it("refuses a sha that is not 40 hex", () => {
     expect(() => commitPullsUrl({ repo: "owner/name", sha: "main" })).toThrow(GithubApiError);
+  });
+});
+
+describe("getPullRequest", () => {
+  it("reads one pull request's state and current head", async () => {
+    respond = () =>
+      HttpResponse.json({ number: 42, state: "open", merged_at: null, head: { sha: OTHER, repo: { full_name: "owner/name" } } });
+    await expect(getPullRequest({ token: "inst", repo: "owner/name", number: 42 })).resolves.toEqual({
+      number: 42, state: "open", merged: false, headSha: OTHER, headRepo: "owner/name",
+    });
+    expect(requests[0]?.url.pathname).toBe("/repos/owner/name/pulls/42");
+    expect(requests[0]?.authorization).toBe("Bearer inst");
+  });
+
+  it("throws on a non-2xx, a body that is not a pull request, and a malformed number", async () => {
+    respond = () => HttpResponse.json({ message: "Not Found" }, { status: 404 });
+    await expect(getPullRequest({ token: "t", repo: "owner/name", number: 42 })).rejects.toBeInstanceOf(GithubApiError);
+    respond = () => HttpResponse.json([]);
+    await expect(getPullRequest({ token: "t", repo: "owner/name", number: 42 })).rejects.toBeInstanceOf(GithubApiError);
+    await expect(getPullRequest({ token: "t", repo: "owner/name", number: 0 })).rejects.toBeInstanceOf(GithubApiError);
+    expect(requests).toHaveLength(2);
   });
 });

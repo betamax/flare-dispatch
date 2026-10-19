@@ -129,6 +129,7 @@ export const GithubDeferred: Layer.Layer<Github> = Layer.succeed(
     branchHead: () => Effect.fail(new GitHubApiError({ status: 0, reason: "unauthorized" })),
     // An empty PR list is a real answer — "no pull request" — so it fails too.
     commitPullRequests: () => Effect.fail(new GitHubApiError({ status: 0, reason: "unauthorized" })),
+    pullRequest: () => Effect.fail(new GitHubApiError({ status: 0, reason: "unauthorized" })),
     appendMeasureNote: () => Effect.fail(new GitHubApiError({ status: 0, reason: "unauthorized" })),
     // `issues` is the same class: an empty list reads as "nothing to triage",
     // which a scheduled run would act on by reporting a clean estate.

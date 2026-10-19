@@ -8,19 +8,25 @@
 // `supersede`, the group that trigger's inputs would join, and starts one
 // RunWorkflow instance per group carrying a `closeGroup` payload.
 //
-// That instance registers a close marker in the group, ranked at the close
-// (`SupersedeSpec.order` of the closed payload's inputs — the PR's
-// `updated_at`). Registration supersedes every lower-ranked member, and each
+// That instance registers a close marker in the group, ranked one millisecond
+// after the close (`SupersedeSpec.order` of the closed payload's inputs — the
+// PR's `updated_at`, which GitHub reports to the second). A landing's push and
+// its merge can share that second; the extra millisecond ranks the marker above
+// the push's gate whichever registers first. Registration supersedes every
+// lower-ranked member, and each
 // superseded tree is cancelled in its own checkpoint (supersede.ts): instances
 // terminated, admission rows released, check-runs concluded `cancelled`. The
 // marker stays live in the group, so a gate for the closed head that registers
-// after the close ranks below it and stands itself down; a reopen ranks above
-// it and supersedes the marker.
+// after the close ranks below it and stands itself down; a reopen in a later
+// second ranks above it and supersedes the marker.
 
 import { Effect, Schema } from "effect";
 import type { RunSupersedeStore } from "@fractalboxdev/flare-dispatch-runtime-cf";
 import { toInstanceId } from "./instance-id";
 import type { TriggerMatch } from "./registry";
+
+/** A close marker ranks this far above the close's `updated_at`. */
+export const CLOSE_RANK_OFFSET_MS = 1;
 
 /** Every close marker's execution id starts with this. */
 export const CLOSE_MARKER_PREFIX = "pr-closed:";
@@ -68,7 +74,7 @@ export const closedGroups = (
     if (trigger.gate !== undefined && !trigger.gate(ctx)) continue;
     const spec = run.supersede(trigger.inputs(ctx));
     if (spec === undefined) continue;
-    groups.set(spec.group, spec.order ?? now);
+    groups.set(spec.group, (spec.order ?? now) + CLOSE_RANK_OFFSET_MS);
   }
   return [...groups].map(([group, rank]) => ({ group, rank }));
 };

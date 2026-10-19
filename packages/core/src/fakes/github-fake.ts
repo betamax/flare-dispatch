@@ -66,6 +66,13 @@ export type GithubFakeState = {
   commitPullRequests: Record<string, readonly CommitPullRequest[]>;
   /** Every `commitPullRequests` call, in order. */
   readonly commitPullRequestsCalls: Array<{ repo: string; sha: string }>;
+  /**
+   * Seeded answers to `pullRequest`, keyed `"owner/name#number"`. An unseeded
+   * pull request FAILS, as an unreadable live answer does.
+   */
+  pullRequests: Record<string, CommitPullRequest>;
+  /** Every `pullRequest` call, in order. */
+  readonly pullRequestCalls: Array<{ repo: string; number: number }>;
   readonly appendMeasureNoteCalls: Array<{ repo: string; commit: string; text: string }>;
   /** Every `issues` call, in order. */
   readonly issuesCalls: Array<{
@@ -174,6 +181,8 @@ export const makeGithubFake = (
     branchHeads?: Record<string, string>;
     /** Commit → PRs keyed `"owner/name:sha"`; an unseeded commit fails. */
     commitPullRequests?: Record<string, readonly CommitPullRequest[]>;
+    /** Pull request keyed `"owner/name#number"`; an unseeded one fails. */
+    pullRequests?: Record<string, CommitPullRequest>;
     /** Clock used to evaluate `pushedWithinDays` / `updatedWithinHours`. */
     now?: number;
     /**
@@ -201,6 +210,8 @@ export const makeGithubFake = (
     branchHeadCalls: [],
     commitPullRequests: { ...opts.commitPullRequests },
     commitPullRequestsCalls: [],
+    pullRequests: { ...opts.pullRequests },
+    pullRequestCalls: [],
     appendMeasureNoteCalls: [],
     issuesCalls: [],
     actionRunsCalls: [],
@@ -440,6 +451,15 @@ export const makeGithubFake = (
         return prs === undefined
           ? Effect.fail(new GitHubApiError({ status: 404, reason: "other" }))
           : Effect.succeed(prs);
+      }),
+
+    pullRequest: ({ repo, number }): Effect.Effect<CommitPullRequest, GitHubApiError> =>
+      Effect.suspend(() => {
+        state.pullRequestCalls.push({ repo, number });
+        const pr = state.pullRequests[`${repo}#${number}`];
+        return pr === undefined
+          ? Effect.fail(new GitHubApiError({ status: 404, reason: "other" }))
+          : Effect.succeed(pr);
       }),
 
     appendMeasureNote: ({ repo, commit, text }) =>

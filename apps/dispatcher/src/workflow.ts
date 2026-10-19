@@ -895,12 +895,14 @@ export class RunWorkflow extends WorkflowEntrypoint<Env> {
         let lastReportedPosition: number | undefined;
 
         for (let i = 0; i < maxAttempts; i++) {
-          // A child reads its parent's row before each claim: once the parent
-          // has ended, the child leaves the queue instead (admission-parent.ts).
+          // A child reads its parent's row before each claim: once a parent
+          // that joins its children has ended, the child leaves the queue
+          // instead (admission-parent.ts).
           const observed = yield* stepDo(`admission-claim-${i}`, () =>
             claimUnlessParentEnded({
               parentExecutionId: payload.parentExecutionId,
-              parentStatus: (id) => Effect.runPromise(supersessions.status(id)),
+              parentRow: (id) => Effect.runPromise(supersessions.row(id)),
+              joinsChildren: (name) => lookupRun(name)?.joinsChildren === true,
               claim: () => Effect.runPromise(admissions.attempt(payload.executionId, admissionPool, enqueuedAt)),
             }),
           );

@@ -46,6 +46,7 @@ import {
   listPullRequests,
   openDraftPullRequest,
   readBranchHead,
+  getPullRequest,
   listCommitPullRequests,
   readRepoTextFile,
   removeIssueLabel,
@@ -306,6 +307,13 @@ export const makeGithubLive = (
         if (config === undefined) return yield* readNeedsCredentials<readonly CommitPullRequest[]>();
         const token = yield* mintToken(config, repo, installationId);
         return yield* ghCall(() => listCommitPullRequests({ token, repo, sha }));
+      }),
+
+    pullRequest: ({ repo, number, installationId }) =>
+      Effect.gen(function* () {
+        if (config === undefined) return yield* readNeedsCredentials<CommitPullRequest>();
+        const token = yield* mintToken(config, repo, installationId);
+        return yield* ghCall(() => getPullRequest({ token, repo, number }));
       }),
 
     appendMeasureNote: ({ repo, commit, text, installationId }) =>

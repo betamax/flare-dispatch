@@ -540,6 +540,16 @@ export interface GithubService {
     installationId?: number;
   }) => Effect.Effect<readonly CommitPullRequest[], GitHubApiError>;
 
+  /**
+   * One pull request's state and current head (`pulls/{number}`). Fails on
+   * any unreadable answer and on an uncredentialed deploy.
+   */
+  readonly pullRequest: (req: {
+    repo: string;
+    number: number;
+    installationId?: number;
+  }) => Effect.Effect<CommitPullRequest, GitHubApiError>;
+
   /** Append one JSON report to a commit's refs/notes/measures note. */
   readonly appendMeasureNote: (req: {
     repo: string;
@@ -738,6 +748,8 @@ export const github = {
     Effect.flatMap(Github, (g) => g.branchHead(req)),
   commitPullRequests: (req: { repo: string; sha: string; installationId?: number }) =>
     Effect.flatMap(Github, (g) => g.commitPullRequests(req)),
+  pullRequest: (req: { repo: string; number: number; installationId?: number }) =>
+    Effect.flatMap(Github, (g) => g.pullRequest(req)),
   appendMeasureNote: (req: {
     repo: string;
     commit: string;

@@ -93,11 +93,14 @@ export type Liveness = { readonly live: true } | { readonly live: false; readonl
 const LIVE: Liveness = { live: true };
 
 /**
- * Decide liveness from the pull requests GitHub associates with the gated
- * commit. The gated PR is `input.pr`, or — for an input that names none — every
- * PR headed in the gated repository. A gated PR open at `sha` is live; one open
- * at another head is superseded; one closed or merged is closed. No gated PR in
- * the answer is unknown, and unknown is live.
+ * Decide liveness from the gated pull request's state. An input naming `pr`
+ * passes that PR (`pulls/{pr}`); an input naming none passes the PRs GitHub
+ * associates with the gated commit (`commits/{sha}/pulls`) and gates every one
+ * headed in the gated repository. A gated PR open at `sha` is live; one open at
+ * another head is superseded; one closed or merged is closed. An input without
+ * `pr` was started by a pull request event, so a commit no PR holds any longer —
+ * force-pushed off its branch — is superseded. An input with `pr` and no answer
+ * for it is unknown, and unknown is live.
  */
 export const prLiveness = (
   input: { readonly repo: string; readonly sha: string; readonly pr?: number | undefined },
@@ -106,12 +109,30 @@ export const prLiveness = (
   const gated = prs.filter((pr) =>
     input.pr !== undefined ? pr.number === input.pr : pr.headRepo === input.repo,
   );
-  const open = gated.filter((pr) => pr.state === "open");
-  if (gated.length === 0 || open.some((pr) => pr.headSha.toLowerCase() === input.sha.toLowerCase())) {
-    return LIVE;
+  if (gated.length === 0) {
+    return input.pr === undefined && prs.length === 0 ? { live: false, reason: "head superseded" } : LIVE;
   }
+  const open = gated.filter((pr) => pr.state === "open");
+  if (open.some((pr) => pr.headSha.toLowerCase() === input.sha.toLowerCase())) return LIVE;
   return { live: false, reason: open.length > 0 ? "head superseded" : "pull request closed" };
 };
+
+/**
+ * The gated pull request's liveness: `pulls/{pr}` when the input names it,
+ * `commits/{sha}/pulls` otherwise. An unreadable answer is live.
+ */
+export const readLiveness = (input: {
+  readonly repo: string;
+  readonly sha: string;
+  readonly pr?: number | undefined;
+}) =>
+  (input.pr !== undefined
+    ? github.pullRequest({ repo: input.repo, number: input.pr }).pipe(Effect.map((pr) => [pr]))
+    : github.commitPullRequests({ repo: input.repo, sha: input.sha })
+  ).pipe(
+    Effect.map((prs) => prLiveness(input, prs)),
+    Effect.orElseSucceed((): Liveness => LIVE),
+  );
 
 /** The summary on the check of a part the gate did not run. */
 export const unrunSummary = (reason: StopReason, timedOut: readonly string[]): string =>
@@ -244,8 +265,13 @@ export const contextfulGate = defineRun({
     {
       event: "pull_request",
       actions: ["opened", "synchronize", "reopened", "ready_for_review"],
+      // A reopen keys on its own `updated_at`: the close terminated the gate
+      // keyed on this head and base, and a reopen without a push must start a
+      // new one rather than collapse onto it.
       idempotencyKey: ({ payload }) =>
-        `contextful-gate:${String(payload.pull_request?.number ?? "")}:${String(payload.pull_request?.head?.sha ?? "")}:${String(payload.pull_request?.base?.sha ?? "")}`,
+        `contextful-gate:${String(payload.pull_request?.number ?? "")}:${String(payload.pull_request?.head?.sha ?? "")}:${String(payload.pull_request?.base?.sha ?? "")}${
+          payload.action === "reopened" ? `:reopened:${String(payload.pull_request?.updated_at ?? "")}` : ""
+        }`,
       gate: ({ payload }) =>
         payload.repository?.full_name === REPO &&
         payload.pull_request?.head?.repo?.full_name === REPO,
@@ -272,6 +298,9 @@ export const contextfulGate = defineRun({
           group: `contextful-gate:${input.repo}#${input.pr}`,
           ...(input.revisedAt !== undefined ? { order: input.revisedAt } : {}),
         },
+  // The gate reads every part's verdict: a part still queued once the gate
+  // has ended leaves the admission queue (apps/dispatcher/src/admission-parent.ts).
+  joinsChildren: true,
   limits: { maxDurationSec: 30 * 3600, admissionMaxQueueAgeSec: 90 * 60 },
   run: (input) =>
     Effect.gen(function* () {
@@ -421,9 +450,11 @@ export const contextfulGate = defineRun({
       // instance id derives from its input, so the re-spawn finds the same
       // children.
       //
-      // Before each spawn the gate asks GitHub whether its pull request is
-      // still open at this commit, and stops spawning when it is not; an
-      // unreadable answer spawns as before. A part that times out in the
+      // Each spawn step first asks GitHub whether the pull request is still
+      // open at this commit, and spawns nothing when it is not; an unreadable
+      // answer spawns as before. The read lives inside the spawn checkpoint, so
+      // an instance replaying spawns cached before the read existed replays
+      // them all before the first fresh read. A part that times out in the
       // admission queue also stops it: the pool is saturated, and further
       // windows would only queue behind the backlog.
       const queue = [...plan.dispatch];
@@ -445,19 +476,11 @@ export const contextfulGate = defineRun({
             executionCreatedAt: createdAt,
             deployedVersion,
           });
-          const liveness = yield* step(`check-liveness-${spawned}`, () =>
-            github.commitPullRequests({ repo: input.repo, sha: input.sha }).pipe(
-              Effect.map((prs) => prLiveness(input, prs)),
-              Effect.orElseSucceed(() => LIVE),
-            ),
-          );
-          if (!liveness.live) {
-            stopped = liveness.reason;
-            break;
-          }
-          const batch = queue.splice(0, free);
-          const { handles, spawnedAt } = yield* step(`spawn-parts-${spawned}`, () =>
+          const batch = queue.slice(0, free);
+          const spawn = yield* step(`spawn-parts-${spawned}`, () =>
             Effect.gen(function* () {
+              const liveness = yield* readLiveness(input);
+              if (!liveness.live) return { stopped: liveness.reason };
               const handles = yield* fanOut({
                 run: "check",
                 items: batch,
@@ -480,6 +503,12 @@ export const contextfulGate = defineRun({
               return { handles, spawnedAt: yield* io.now };
             }),
           );
+          if ("stopped" in spawn) {
+            stopped = spawn.stopped;
+            break;
+          }
+          const { handles, spawnedAt } = spawn;
+          queue.splice(0, batch.length);
           if (spawned === 0) {
             yield* step("handoff-admission", () => handoffChildAdmission());
           }

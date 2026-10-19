@@ -30,13 +30,22 @@ const closedPayload = (over: { merged?: boolean; headRepo?: string; action?: str
 describe("closedGroups", () => {
   const matches = triggersByEvent("pull_request");
 
-  it("names the gate's group, ranked at the close, for a merged or unmerged close", () => {
+  it("names the gate's group, ranked one millisecond after the close, for a merged or unmerged close", () => {
     expect(matches.some(({ run }) => run.name === contextfulGate.name)).toBe(true);
     for (const merged of [true, false]) {
       expect(closedGroups("pull_request", closedPayload({ merged }), matches, 0)).toEqual([
-        { group: `contextful-gate:${REPO}#42`, rank: Date.parse("2026-10-19T10:00:05Z") },
+        { group: `contextful-gate:${REPO}#42`, rank: Date.parse("2026-10-19T10:00:05Z") + 1 },
       ]);
     }
+  });
+
+  it("ranks the marker above a gate for a push in the close's own second", () => {
+    // GitHub reports `updated_at` to the second: a landing's push and merge can share it.
+    const push = { ...closedPayload(), action: "synchronize" };
+    const gateRank = contextfulGate.supersede?.(contextfulGate.triggers![0]!.inputs({ payload: push }))?.order;
+    const [close] = closedGroups("pull_request", closedPayload(), matches, 0);
+    expect(gateRank).toBe(Date.parse("2026-10-19T10:00:05Z"));
+    expect(close!.rank).toBeGreaterThan(gateRank!);
   });
 
   it("ends nothing for another action, another event, or a payload the trigger's gate refuses", () => {

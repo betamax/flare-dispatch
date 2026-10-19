@@ -1,16 +1,20 @@
-// A queued child whose parent has ended leaves the admission queue.
+// A queued child whose joining parent has ended leaves the admission queue.
 //
 // A fan-out child enqueues for an admission slot and waits, polling one durable
-// claim step at a time. Its parent can end while it waits — superseded, failed,
-// cancelled or finished — and nothing then reads the child's verdict. So each
-// claim step first reads the parent's row: once that row is terminal, the child
-// ends its own row `cancelled` and deletes its admission, serial-queue and
+// claim step at a time. A parent whose run declares `joinsChildren` reads every
+// child's verdict; once it ends — superseded, failed or cancelled — nothing
+// reads the verdict of a child still queued. So each claim step first reads the
+// parent's row: once that row is terminal and its run joins its children, the
+// child ends its own row `cancelled` and deletes its admission, serial-queue and
 // supersession rows in one checkpoint, concludes its check-run `cancelled`, and
 // fails `RunSkipped`. Its row is already `cancelled`, so the finalizer records
 // and concludes nothing further.
 //
-// A parent-status read that fails keeps the child waiting: the claim proceeds
-// exactly as it would without the read.
+// A parent that spawns children without waiting on them (product-demo's
+// demo-reel and self-heal-pr) declares no `joinsChildren`; its children outlive
+// it. The rule reads the parent's run from its row, so a child spawned before
+// a deploy follows it too. A parent-row read that fails keeps the child
+// waiting: the claim proceeds exactly as it would without the read.
 
 import { Effect } from "effect";
 import { RunSkipped } from "@fractalboxdev/flare-dispatch-core";
@@ -32,17 +36,21 @@ export const parentEndedSummary = (parentId: string, status: string): string =>
   `⊘ Cancelled — parent execution \`${parentId}\` ended \`${status}\` while this part waited for an admission slot.`;
 
 /**
- * One claim step's body: the parent's status first, then — only while the
- * parent lives — the admission claim itself.
+ * One claim step's body: the parent's row first, then — unless a joining
+ * parent has ended — the admission claim itself.
  */
 export const claimUnlessParentEnded = async <A>(opts: {
   readonly parentExecutionId: string | undefined;
-  readonly parentStatus: (id: string) => Promise<string | undefined>;
+  readonly parentRow: (id: string) => Promise<{ readonly status: string; readonly run: string } | undefined>;
+  /** Whether a run declares `joinsChildren`. */
+  readonly joinsChildren: (run: string) => boolean;
   readonly claim: () => Promise<A>;
 }): Promise<A | ParentEnded> => {
   if (opts.parentExecutionId !== undefined) {
-    const status = await opts.parentStatus(opts.parentExecutionId).catch(() => undefined);
-    if (parentHasEnded(status)) return { parentEnded: status };
+    const row = await opts.parentRow(opts.parentExecutionId).catch(() => undefined);
+    if (row !== undefined && parentHasEnded(row.status) && opts.joinsChildren(row.run)) {
+      return { parentEnded: row.status };
+    }
   }
   return opts.claim();
 };
