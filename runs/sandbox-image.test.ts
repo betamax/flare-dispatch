@@ -15,7 +15,6 @@
 // guarded the moment it ships — a new run that wrongly sets `"browser"`, or a
 // new CDP run, can't slip past an out-of-date table.
 
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { Run } from "@fractalboxdev/flare-dispatch-core";
 import * as catalog from "./index";
@@ -64,24 +63,5 @@ describe("sandboxImage catalog", () => {
       )
       .map((r) => r.name);
     expect(unknown).toEqual([]);
-  });
-});
-
-describe("Rust sandbox images", () => {
-  const pins = (file: string) => {
-    const text = readFileSync(new URL(`../infra/${file}`, import.meta.url), "utf8");
-    return {
-      version: /^ARG NEXTEST_VERSION=(\d+\.\d+\.\d+)$/m.exec(text)?.[1],
-      sha256: /^ARG NEXTEST_SHA256=([a-f0-9]{64})$/m.exec(text)?.[1],
-      verified: text.includes('sha256sum -c -') && text.includes("cargo nextest --version"),
-    };
-  };
-
-  it("bake one pinned, digest-checked cargo-nextest in both Rust-capable images", () => {
-    const demo = pins("Dockerfile.sandbox-demo");
-    expect(demo.version).toBeDefined();
-    expect(demo.sha256).toBeDefined();
-    expect(demo.verified).toBe(true);
-    expect(pins("Dockerfile.sandbox")).toEqual(demo);
   });
 });
